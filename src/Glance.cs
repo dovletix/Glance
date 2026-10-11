@@ -63,7 +63,7 @@ namespace Glance
             if (dt <= 0) return;
             double k = 1.0 - Math.Exp(-dt / 0.13);
             Value = Value + (target - Value) * k;
-            if (Math.Abs(target - Value) < 0.02) Value = target;
+            if (Math.Abs(target - Value) < 0.008) Value = target;
         }
     }
 
@@ -184,7 +184,9 @@ namespace Glance
         readonly Rectangle[] barHit = new Rectangle[6];
         readonly Rectangle[] listHit = new Rectangle[6];
         readonly Ease[] openEase = new Ease[] { new Ease(), new Ease(), new Ease(), new Ease(), new Ease(), new Ease() };
+        readonly int[] revealTail = new int[6];
         int hover = -1;
+        System.Windows.Forms.Timer uiTimer;
 
         Font titleFont;
         Font labelFont;
@@ -226,10 +228,10 @@ namespace Glance
             UpdateStyles();
             BuildMenu();
 
-            System.Windows.Forms.Timer ui = new System.Windows.Forms.Timer();
-            ui.Interval = 32;
-            ui.Tick += delegate { Invalidate(); };
-            ui.Start();
+            uiTimer = new System.Windows.Forms.Timer();
+            uiTimer.Interval = 32;
+            uiTimer.Tick += delegate { Invalidate(); };
+            uiTimer.Start();
         }
 
         protected override CreateParams CreateParams
@@ -713,9 +715,18 @@ namespace Glance
                 }
             }
 
-            int need = y + S(18);
+            int tail = 0;
+            for (int i = 0; i < revealTail.Length; i++) tail += revealTail[i];
+            int need = y + S(18) + tail;
             if (Math.Abs(ClientSize.Height - need) > 2)
                 ClientSize = new Size(ClientSize.Width, need);
+            bool moving = false;
+            for (int i = 0; i < openEase.Length; i++)
+            {
+                double target = i == hover ? 1 : 0;
+                if (Math.Abs(openEase[i].Value - target) > 0.01) moving = true;
+            }
+            if (uiTimer != null) uiTimer.Interval = moving ? 8 : 32;
         }
 
         int DrawMetric(Graphics g, int x, int y, int w, string label, string value, double? bar, Ring ring, Color valueColor, int section, Snapshot snap)
@@ -755,15 +766,16 @@ namespace Glance
             listHit[section] = Rectangle.Empty;
             int extra = 0;
             double open = openEase[section].Value;
-            if (open > 0.02)
+            int full = RevealFull(snap, section);
+            int vis = 0;
+            if (open > 0.01 && full > 0)
             {
                 List<Rank> rows = snap.Ranks == null ? null : snap.Ranks.Rows[section];
                 int count = rows == null ? 0 : rows.Count;
                 if (count > 5) count = 5;
-                int rowsH = count == 0 ? S(28) : count * S(24);
-                int full = rowsH + S(14);
-                int vis = (int)Math.Round(full * open);
-                if (vis < 2) vis = 2;
+                vis = (int)Math.Round(full * open);
+                if (vis < 1) vis = 1;
+                if (vis > full) vis = full;
                 Rectangle box = new Rectangle(x, barRect.Bottom + S(8), w, vis);
                 Rectangle list = box;
                 list.Y -= S(10);
@@ -773,7 +785,20 @@ namespace Glance
                 DrawReveal(g, box, rows, count, accent);
                 extra = vis + S(6);
             }
+            if ((hover == section || open > 0.01) && full > 0)
+                revealTail[section] = Math.Max(0, full + S(6) - extra);
+            else
+                revealTail[section] = 0;
             return y + S(80) + extra;
+        }
+
+        int RevealFull(Snapshot snap, int section)
+        {
+            List<Rank> rows = snap.Ranks == null ? null : snap.Ranks.Rows[section];
+            int count = rows == null ? 0 : rows.Count;
+            if (count > 5) count = 5;
+            int rowsH = count == 0 ? S(28) : count * S(24);
+            return rowsH + S(14) + S(6);
         }
 
         void DrawReveal(Graphics g, Rectangle box, List<Rank> rows, int count, Color accent)
@@ -1576,23 +1601,115 @@ namespace Glance
 
         void FillVram(ProcReader procs, List<Rank> dst)
         {
-            Dictionary<uint, ulong> byPid = new Dictionary<uint, ulong>();
-            ReadProcs(nvmlDeviceGetGraphicsRunningProcesses_v3, byPid);
-            ReadProcs(nvmlDeviceGetComputeRunningProcesses_v3, byPid);
+            Dictionary<uint, double> pids = ReadDedicated();
+            if (pids.Count == 0) return;
             Dictionary<string, double> byName = new Dictionary<string, double>();
-            double total = 0;
-            foreach (KeyValuePair<uint, ulong> kv in byPid)
+            foreach (KeyValuePair<uint, double> kv in pids)
             {
-                if (kv.Value == ulong.MaxValue) continue;
-                double mb = kv.Value / 1048576.0;
-                if (mb < 40) continue;
-                total += mb;
+                if (kv.Key == 0 || kv.Key == 4) continue;
+                if (kv.Value < 16) continue;
                 string name = procs.NameOf(kv.Key);
                 double have;
                 if (!byName.TryGetValue(name, out have)) have = 0;
-                byName[name] = have + mb;
+                byName[name] = have + kv.Value;
             }
             PutGpu(byName, dst, false);
+        }
+
+        Dictionary<uint, double> ReadDedicated()
+        {
+            Dictionary<uint, double> empty = new Dictionary<uint, double>();
+            uint chars = 0;
+            int rc = PdhExpandWildCardPath(null, @"\GPU Process Memory(*)\Dedicated Usage", IntPtr.Zero, ref chars, 0);
+            if (chars < 2 || chars > 200000) return empty;
+            IntPtr list = Marshal.AllocHGlobal((int)chars * 2);
+            IntPtr query = IntPtr.Zero;
+            try
+            {
+                rc = PdhExpandWildCardPath(null, @"\GPU Process Memory(*)\Dedicated Usage", list, ref chars, 0);
+                if (rc != 0) return empty;
+                List<string> paths = new List<string>();
+                int offset = 0;
+                while (offset < (int)chars)
+                {
+                    string path = Marshal.PtrToStringUni(new IntPtr(list.ToInt64() + offset * 2));
+                    if (string.IsNullOrEmpty(path)) break;
+                    paths.Add(path);
+                    offset += path.Length + 1;
+                }
+                if (paths.Count == 0) return empty;
+                if (PdhOpenQuery(null, IntPtr.Zero, out query) != 0) return empty;
+                List<IntPtr> counters = new List<IntPtr>();
+                List<uint> counterPids = new List<uint>();
+                List<string> counterLuids = new List<string>();
+                for (int i = 0; i < paths.Count; i++)
+                {
+                    uint pid;
+                    string luid;
+                    if (!ParseGpuInstance(paths[i], out pid, out luid)) continue;
+                    IntPtr counter;
+                    if (PdhAddEnglishCounter(query, paths[i], IntPtr.Zero, out counter) != 0) continue;
+                    counters.Add(counter);
+                    counterPids.Add(pid);
+                    counterLuids.Add(luid);
+                }
+                if (counters.Count == 0) return empty;
+                if (PdhCollectQueryData(query) != 0) return empty;
+                Dictionary<string, double> luidSum = new Dictionary<string, double>();
+                Dictionary<string, Dictionary<uint, double>> luidPid = new Dictionary<string, Dictionary<uint, double>>();
+                for (int i = 0; i < counters.Count; i++)
+                {
+                    PdhFmt v;
+                    if (PdhGetFormattedCounterValue(counters[i], 0x200, IntPtr.Zero, out v) != 0) continue;
+                    if (v.doubleValue <= 0) continue;
+                    double mb = v.doubleValue / 1048576.0;
+                    string luid = counterLuids[i];
+                    double sum;
+                    if (!luidSum.TryGetValue(luid, out sum)) sum = 0;
+                    luidSum[luid] = sum + mb;
+                    Dictionary<uint, double> bucket;
+                    if (!luidPid.TryGetValue(luid, out bucket))
+                    {
+                        bucket = new Dictionary<uint, double>();
+                        luidPid[luid] = bucket;
+                    }
+                    double have;
+                    if (!bucket.TryGetValue(counterPids[i], out have)) have = 0;
+                    bucket[counterPids[i]] = have + mb;
+                }
+                string best = "";
+                double bestSum = -1;
+                foreach (KeyValuePair<string, double> kv in luidSum)
+                {
+                    if (kv.Value > bestSum)
+                    {
+                        bestSum = kv.Value;
+                        best = kv.Key;
+                    }
+                }
+                Dictionary<uint, double> found;
+                if (best.Length == 0 || !luidPid.TryGetValue(best, out found)) return empty;
+                return found;
+            }
+            finally
+            {
+                if (query != IntPtr.Zero) PdhCloseQuery(query);
+                Marshal.FreeHGlobal(list);
+            }
+        }
+
+        static bool ParseGpuInstance(string path, out uint pid, out string luid)
+        {
+            pid = 0;
+            luid = "";
+            int pidAt = path.IndexOf("pid_", StringComparison.OrdinalIgnoreCase);
+            int luidAt = path.IndexOf("_luid_", StringComparison.OrdinalIgnoreCase);
+            int physAt = path.IndexOf("_phys_", StringComparison.OrdinalIgnoreCase);
+            if (pidAt < 0 || luidAt < 0 || physAt < 0 || luidAt <= pidAt) return false;
+            string pidText = path.Substring(pidAt + 4, luidAt - (pidAt + 4));
+            if (!uint.TryParse(pidText, NumberStyles.Integer, CultureInfo.InvariantCulture, out pid)) return false;
+            luid = path.Substring(luidAt + 6, physAt - (luidAt + 6));
+            return luid.Length > 0;
         }
 
         void ReadProcs(ProcQuery query, Dictionary<uint, ulong> byPid)
@@ -1679,6 +1796,24 @@ namespace Glance
 
         [DllImport("nvml.dll", CallingConvention = CallingConvention.Cdecl)]
         static extern int nvmlDeviceGetMemoryInfo(IntPtr device, out NvmlMemory mem);
+
+        [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+        static extern int PdhOpenQuery(string src, IntPtr user, out IntPtr query);
+
+        [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+        static extern int PdhAddEnglishCounter(IntPtr query, string path, IntPtr user, out IntPtr counter);
+
+        [DllImport("pdh.dll")]
+        static extern int PdhCollectQueryData(IntPtr query);
+
+        [DllImport("pdh.dll")]
+        static extern int PdhGetFormattedCounterValue(IntPtr counter, int format, IntPtr type, out PdhFmt value);
+
+        [DllImport("pdh.dll")]
+        static extern int PdhCloseQuery(IntPtr query);
+
+        [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+        static extern int PdhExpandWildCardPath(string src, string path, IntPtr list, ref uint size, uint flags);
     }
 
     [StructLayout(LayoutKind.Sequential)]
