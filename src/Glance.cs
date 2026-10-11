@@ -52,6 +52,36 @@ namespace Glance
             Value = Value + (target - Value) * k;
             if (Math.Abs(target - Value) < 0.05) Value = target;
         }
+
+        public void TowardIn(double target, double dt)
+        {
+            if (!On)
+            {
+                Value = 0;
+                On = true;
+            }
+            if (dt <= 0) return;
+            double k = 1.0 - Math.Exp(-dt / 0.13);
+            Value = Value + (target - Value) * k;
+            if (Math.Abs(target - Value) < 0.02) Value = target;
+        }
+    }
+
+    sealed class Rank
+    {
+        public string Text = "";
+        public double Share;
+        public double Sort;
+    }
+
+    sealed class RankBoard
+    {
+        public readonly List<Rank>[] Rows = new List<Rank>[6];
+
+        public RankBoard()
+        {
+            for (int i = 0; i < 6; i++) Rows[i] = new List<Rank>();
+        }
     }
 
     sealed class Ring
@@ -99,6 +129,7 @@ namespace Glance
         public List<double> TopPct = new List<double>();
         public List<string> MemName = new List<string>();
         public List<double> MemMb = new List<double>();
+        public RankBoard Ranks = new RankBoard();
     }
 
     sealed class FlowHit
@@ -150,6 +181,10 @@ namespace Glance
         bool dragging;
         Point dragOffset;
         Rectangle closeRect;
+        readonly Rectangle[] barHit = new Rectangle[6];
+        readonly Rectangle[] listHit = new Rectangle[6];
+        readonly Ease[] openEase = new Ease[] { new Ease(), new Ease(), new Ease(), new Ease(), new Ease(), new Ease() };
+        int hover = -1;
 
         Font titleFont;
         Font labelFont;
@@ -433,6 +468,10 @@ namespace Glance
                 Point screen = PointToScreen(e.Location);
                 Location = new Point(screen.X - dragOffset.X, screen.Y - dragOffset.Y);
             }
+            else
+            {
+                hover = HitSection(e.Location);
+            }
             Cursor = closeRect.Contains(e.Location) ? Cursors.Hand : Cursors.SizeAll;
             base.OnMouseMove(e);
         }
@@ -443,8 +482,28 @@ namespace Glance
             {
                 dragging = false;
                 SaveSettings();
+                hover = HitSection(e.Location);
             }
             base.OnMouseUp(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (!dragging) hover = -1;
+            base.OnMouseLeave(e);
+        }
+
+        int HitSection(Point p)
+        {
+            for (int i = 0; i < listHit.Length; i++)
+            {
+                if (!listHit[i].IsEmpty && listHit[i].Contains(p)) return i;
+            }
+            for (int i = 0; i < barHit.Length; i++)
+            {
+                if (!barHit[i].IsEmpty && barHit[i].Contains(p)) return i;
+            }
+            return -1;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -513,9 +572,9 @@ namespace Glance
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
 
             int y = S(76);
-            y = DrawMetric(g, x, y, w, "Процессор", snap.HasCpu ? Pct(cpuEase.Value) : "н/д", snap.HasCpu ? (double?)cpuEase.Value : null, cpuRing, text);
+            y = DrawMetric(g, x, y, w, "Процессор", snap.HasCpu ? Pct(cpuEase.Value) : "н/д", snap.HasCpu ? (double?)cpuEase.Value : null, cpuRing, text, 0, snap);
             string ramVal = snap.HasRam ? Pct(ramEase.Value) + "   " + Gb(ramUsedEase.Value) + " / " + Gb(snap.RamTotal) + " ГБ" : "н/д";
-            y = DrawMetric(g, x, y, w, "Память", ramVal, snap.HasRam ? (double?)ramEase.Value : null, ramRing, text);
+            y = DrawMetric(g, x, y, w, "Память", ramVal, snap.HasRam ? (double?)ramEase.Value : null, ramRing, text, 1, snap);
 
             string gpuLabel = "Чип";
             if (!string.IsNullOrEmpty(snap.GpuName)) gpuLabel = "Чип  ·  " + snap.GpuName;
@@ -525,20 +584,20 @@ namespace Glance
                 gpuVal = Pct(gpuEase.Value);
                 if (snap.HasTemp) gpuVal += "   " + ((int)Math.Round(tempEase.Value)).ToString(CultureInfo.InvariantCulture) + "°C";
             }
-            y = DrawMetric(g, x, y, w, gpuLabel, gpuVal, snap.HasGpu ? (double?)gpuEase.Value : null, gpuRing, text);
+            y = DrawMetric(g, x, y, w, gpuLabel, gpuVal, snap.HasGpu ? (double?)gpuEase.Value : null, gpuRing, text, 2, snap);
 
             string vramVal = snap.HasVram ? Pct(vramEase.Value) + "   " + Gb(vramUsedEase.Value) + " / " + Gb(snap.VramTotal) + " ГБ" : "н/д";
-            y = DrawMetric(g, x, y, w, "Видеопамять", vramVal, snap.HasVram ? (double?)vramEase.Value : null, null, text);
+            y = DrawMetric(g, x, y, w, "Видеопамять", vramVal, snap.HasVram ? (double?)vramEase.Value : null, null, text, 3, snap);
 
             string diskVal = "н/д";
             if (snap.HasDisk) diskVal = Pct(diskEase.Value) + "   " + Num(diskIoEase.Value) + " МБ/с";
-            y = DrawMetric(g, x, y, w, "Диск", diskVal, snap.HasDisk ? (double?)diskEase.Value : null, diskRing, text);
+            y = DrawMetric(g, x, y, w, "Диск", diskVal, snap.HasDisk ? (double?)diskEase.Value : null, diskRing, text, 4, snap);
 
             string netVal = "н/д";
             if (snap.HasNet) netVal = "↓ " + Num(downEase.Value) + "   ↑ " + Num(upEase.Value) + " Мбит/с";
             bool netHot = snap.HasNet && (snap.Down >= 5 || snap.Up >= 5 || downEase.Value >= 5 || upEase.Value >= 5);
-            y = DrawMetric(g, x, y, w, "Сеть", netVal, null, null, netHot ? warn : text);
-            if (snap.HasNet && !string.IsNullOrEmpty(snap.NetName))
+            y = DrawMetric(g, x, y, w, "Сеть", netVal, null, null, netHot ? warn : text, 5, snap);
+            if (snap.HasNet && !string.IsNullOrEmpty(snap.NetName) && openEase[5].Value < 0.2)
             {
                 DrawUi(g, snap.NetName, tinyFont, new Rectangle(x, y - S(18), w, S(16)), muted,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
@@ -655,11 +714,11 @@ namespace Glance
             }
 
             int need = y + S(18);
-            if (Math.Abs(ClientSize.Height - need) > 6)
+            if (Math.Abs(ClientSize.Height - need) > 2)
                 ClientSize = new Size(ClientSize.Width, need);
         }
 
-        int DrawMetric(Graphics g, int x, int y, int w, string label, string value, double? bar, Ring ring, Color valueColor)
+        int DrawMetric(Graphics g, int x, int y, int w, string label, string value, double? bar, Ring ring, Color valueColor, int section, Snapshot snap)
         {
             DrawUi(g, label, labelFont, new Rectangle(x, y, w, S(16)), muted,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
@@ -690,7 +749,58 @@ namespace Glance
                         FillRound(g, fb, fr, S(3));
                 }
             }
-            return y + S(80);
+            Rectangle hit = barRect;
+            hit.Inflate(0, S(12));
+            barHit[section] = hit;
+            listHit[section] = Rectangle.Empty;
+            int extra = 0;
+            double open = openEase[section].Value;
+            if (open > 0.02)
+            {
+                List<Rank> rows = snap.Ranks == null ? null : snap.Ranks.Rows[section];
+                int count = rows == null ? 0 : rows.Count;
+                if (count > 5) count = 5;
+                int rowsH = count == 0 ? S(28) : count * S(24);
+                int full = rowsH + S(14);
+                int vis = (int)Math.Round(full * open);
+                if (vis < 2) vis = 2;
+                Rectangle box = new Rectangle(x, barRect.Bottom + S(8), w, vis);
+                Rectangle list = box;
+                list.Y -= S(10);
+                list.Height += S(10);
+                listHit[section] = list;
+                Color accent = bar.HasValue ? Level(bar.Value < 0 ? 0 : bar.Value) : valueColor;
+                DrawReveal(g, box, rows, count, accent);
+                extra = vis + S(6);
+            }
+            return y + S(80) + extra;
+        }
+
+        void DrawReveal(Graphics g, Rectangle box, List<Rank> rows, int count, Color accent)
+        {
+            g.SetClip(box);
+            using (SolidBrush back = new SolidBrush(Color.FromArgb(24, 28, 40)))
+                FillRound(g, back, box, S(8));
+            using (SolidBrush mark = new SolidBrush(accent))
+                g.FillRectangle(mark, box.X + S(1), box.Y + S(8), S(3), Math.Max(0, box.Height - S(16)));
+            int ry = box.Top + S(6);
+            if (count == 0)
+            {
+                DrawUi(g, "Сейчас тихо", smallFont, new Rectangle(box.X + S(14), ry, box.Width - S(20), S(22)), muted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+            else
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    Rank row = rows[i];
+                    Color c = row.Share < 0 ? text : Level(row.Share);
+                    DrawUi(g, row.Text, smallFont, new Rectangle(box.X + S(14), ry, box.Width - S(22), S(22)), c,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+                    ry += S(24);
+                }
+            }
+            g.ResetClip();
         }
 
         void DrawSpark(Graphics g, Rectangle r, Ring ring, Color color)
@@ -765,6 +875,11 @@ namespace Glance
             {
                 downEase.Toward(snap.Down, dt);
                 upEase.Toward(snap.Up, dt);
+            }
+            if (!dragging)
+            {
+                for (int i = 0; i < openEase.Length; i++)
+                    openEase[i].TowardIn(i == hover ? 1 : 0, dt);
             }
             Dictionary<string, bool> seen = new Dictionary<string, bool>();
             if (snap.Flows != null)
@@ -1099,6 +1214,7 @@ namespace Glance
         List<double> holdPct = new List<double>();
         List<string> holdMem = new List<string>();
         List<double> holdMemMb = new List<double>();
+        RankBoard holdRanks = new RankBoard();
 
         public Sampler()
         {
@@ -1168,7 +1284,9 @@ namespace Glance
             }
             if (processes)
             {
-                procs.Sample(s.Hung, s.TopName, s.TopPct, s.MemName, s.MemMb);
+                procs.Sample(s.Hung, s.TopName, s.TopPct, s.MemName, s.MemMb, s.Ranks);
+                try { gpu.FillRanks(procs, s.Ranks.Rows[2], s.Ranks.Rows[3]); }
+                catch (Exception ex) { MainFormLog("gpu ranks " + ex.GetType().Name); }
                 holdHung = s.Hung;
                 holdTop = s.TopName;
                 holdPct = s.TopPct;
@@ -1198,7 +1316,53 @@ namespace Glance
                     s.Flows.Add(hit);
                 }
             }
+            if (processes) holdRanks = s.Ranks;
+            else s.Ranks = holdRanks;
+            if (elevated && s.Ranks != null) s.Ranks.Rows[5] = BuildNetRanks();
             return s;
+        }
+
+        List<Rank> BuildNetRanks()
+        {
+            List<Rank> dst = new List<Rank>();
+            Dictionary<string, double[]> by = new Dictionary<string, double[]>();
+            for (int i = 0; i < net.Ranked.Count; i++)
+            {
+                PidRate rate = net.Ranked[i];
+                string name = procs.NameOf(rate.Pid);
+                double[] a;
+                if (!by.TryGetValue(name, out a))
+                {
+                    a = new double[2];
+                    by[name] = a;
+                }
+                a[0] += rate.Down;
+                a[1] += rate.Up;
+            }
+            List<Rank> tmp = new List<Rank>();
+            foreach (KeyValuePair<string, double[]> kv in by)
+            {
+                Rank r = new Rank();
+                r.Text = NetLine(kv.Key, kv.Value[0], kv.Value[1]);
+                r.Share = (kv.Value[0] >= 5 || kv.Value[1] >= 5) ? 76 : -1;
+                r.Sort = kv.Value[0] + kv.Value[1];
+                tmp.Add(r);
+            }
+            tmp.Sort(delegate(Rank a, Rank b) { return b.Sort.CompareTo(a.Sort); });
+            int n = tmp.Count > 5 ? 5 : tmp.Count;
+            for (int i = 0; i < n; i++) dst.Add(tmp[i]);
+            return dst;
+        }
+
+        static string NetLine(string name, double down, double up)
+        {
+            if (string.IsNullOrEmpty(name)) name = "Процесс";
+            CultureInfo ru = CultureInfo.GetCultureInfo("ru-RU");
+            string d = down.ToString("0.0", ru);
+            string u = up.ToString("0.0", ru);
+            if (down >= 5 && up >= 5) return name + "   ↓ " + d + "   ↑ " + u + " Мбит/с";
+            if (down >= up) return name + "   ↓ " + d + " Мбит/с";
+            return name + "   ↑ " + u + " Мбит/с";
         }
 
         void ReadCpu(Snapshot s)
@@ -1364,6 +1528,137 @@ namespace Glance
             return hasUtil || hasTemp || hasVram;
         }
 
+        public void FillRanks(ProcReader procs, List<Rank> gpu, List<Rank> vram)
+        {
+            if (!ready || procs == null) return;
+            if (gpu != null) FillUtil(procs, gpu);
+            if (vram != null) FillVram(procs, vram);
+        }
+
+        void FillUtil(ProcReader procs, List<Rank> dst)
+        {
+            uint count = 0;
+            int rc = nvmlDeviceGetProcessUtilization(device, IntPtr.Zero, ref count, lastUtil);
+            if ((rc != 0 && rc != 7) || count == 0 || count > 128) return;
+            int stride = Marshal.SizeOf(typeof(NvmlProcUtil));
+            IntPtr buf = Marshal.AllocHGlobal((int)count * stride);
+            try
+            {
+                rc = nvmlDeviceGetProcessUtilization(device, buf, ref count, lastUtil);
+                if (rc != 0) return;
+                Dictionary<uint, uint> byPid = new Dictionary<uint, uint>();
+                ulong newest = lastUtil;
+                for (uint i = 0; i < count; i++)
+                {
+                    IntPtr p = new IntPtr(buf.ToInt64() + (long)i * stride);
+                    NvmlProcUtil s = (NvmlProcUtil)Marshal.PtrToStructure(p, typeof(NvmlProcUtil));
+                    if (s.TimeStamp > newest) newest = s.TimeStamp;
+                    if (s.Pid == 0) continue;
+                    uint have;
+                    if (!byPid.TryGetValue(s.Pid, out have) || s.SmUtil > have) byPid[s.Pid] = s.SmUtil;
+                }
+                lastUtil = newest;
+                Dictionary<string, double> byName = new Dictionary<string, double>();
+                foreach (KeyValuePair<uint, uint> kv in byPid)
+                {
+                    if (kv.Value < 1) continue;
+                    string name = procs.NameOf(kv.Key);
+                    double have;
+                    if (!byName.TryGetValue(name, out have)) have = 0;
+                    have += kv.Value;
+                    if (have > 100) have = 100;
+                    byName[name] = have;
+                }
+                PutGpu(byName, dst, true);
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        void FillVram(ProcReader procs, List<Rank> dst)
+        {
+            Dictionary<uint, ulong> byPid = new Dictionary<uint, ulong>();
+            ReadProcs(nvmlDeviceGetGraphicsRunningProcesses_v3, byPid);
+            ReadProcs(nvmlDeviceGetComputeRunningProcesses_v3, byPid);
+            Dictionary<string, double> byName = new Dictionary<string, double>();
+            double total = 0;
+            foreach (KeyValuePair<uint, ulong> kv in byPid)
+            {
+                if (kv.Value == ulong.MaxValue) continue;
+                double mb = kv.Value / 1048576.0;
+                if (mb < 40) continue;
+                total += mb;
+                string name = procs.NameOf(kv.Key);
+                double have;
+                if (!byName.TryGetValue(name, out have)) have = 0;
+                byName[name] = have + mb;
+            }
+            PutGpu(byName, dst, false);
+        }
+
+        void ReadProcs(ProcQuery query, Dictionary<uint, ulong> byPid)
+        {
+            if (query == null) return;
+            uint count = 0;
+            int rc = query(device, ref count, IntPtr.Zero);
+            if ((rc != 0 && rc != 7) || count == 0 || count > 128) return;
+            int stride = Marshal.SizeOf(typeof(NvmlProcInfo));
+            IntPtr buf = Marshal.AllocHGlobal((int)count * stride);
+            try
+            {
+                rc = query(device, ref count, buf);
+                if (rc != 0) return;
+                for (uint i = 0; i < count; i++)
+                {
+                    IntPtr p = new IntPtr(buf.ToInt64() + (long)i * stride);
+                    NvmlProcInfo info = (NvmlProcInfo)Marshal.PtrToStructure(p, typeof(NvmlProcInfo));
+                    if (info.Pid == 0 || info.Used == ulong.MaxValue) continue;
+                    ulong have;
+                    if (!byPid.TryGetValue(info.Pid, out have) || info.Used > have) byPid[info.Pid] = info.Used;
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        static void PutGpu(Dictionary<string, double> map, List<Rank> dst, bool percent)
+        {
+            dst.Clear();
+            List<KeyValuePair<string, double>> items = new List<KeyValuePair<string, double>>();
+            foreach (KeyValuePair<string, double> kv in map) items.Add(kv);
+            items.Sort(delegate(KeyValuePair<string, double> a, KeyValuePair<string, double> b) { return b.Value.CompareTo(a.Value); });
+            int n = items.Count > 5 ? 5 : items.Count;
+            CultureInfo ru = CultureInfo.GetCultureInfo("ru-RU");
+            for (int i = 0; i < n; i++)
+            {
+                Rank r = new Rank();
+                if (percent)
+                {
+                    r.Text = ((int)Math.Round(items[i].Value)).ToString(CultureInfo.InvariantCulture) + "%   " + items[i].Key;
+                    r.Share = items[i].Value;
+                }
+                else
+                {
+                    double mb = items[i].Value;
+                    string label = mb >= 1024 ? (mb / 1024.0).ToString("0.0", ru) + " ГБ" : ((int)Math.Round(mb)).ToString(CultureInfo.InvariantCulture) + " МБ";
+                    r.Text = label + "   " + items[i].Key;
+                    r.Share = -1;
+                }
+                dst.Add(r);
+            }
+        }
+
+        delegate int ProcQuery(IntPtr device, ref uint count, IntPtr infos);
+
+        ulong lastUtil;
+
+        [DllImport("nvml.dll", CallingConvention = CallingConvention.Cdecl)]
+        static extern int nvmlDeviceGetProcessUtilization(IntPtr device, IntPtr samples, ref uint count, ulong lastSeen);
+
+        [DllImport("nvml.dll", CallingConvention = CallingConvention.Cdecl)]
+        static extern int nvmlDeviceGetGraphicsRunningProcesses_v3(IntPtr device, ref uint count, IntPtr infos);
+
+        [DllImport("nvml.dll", CallingConvention = CallingConvention.Cdecl)]
+        static extern int nvmlDeviceGetComputeRunningProcesses_v3(IntPtr device, ref uint count, IntPtr infos);
+
         [DllImport("nvml.dll", CallingConvention = CallingConvention.Cdecl)]
         static extern int nvmlInit_v2();
 
@@ -1391,6 +1686,26 @@ namespace Glance
     {
         public uint Gpu;
         public uint Memory;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct NvmlProcUtil
+    {
+        public uint Pid;
+        public ulong TimeStamp;
+        public uint SmUtil;
+        public uint MemUtil;
+        public uint EncUtil;
+        public uint DecUtil;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct NvmlProcInfo
+    {
+        public uint Pid;
+        public ulong Used;
+        public uint GpuInstanceId;
+        public uint ComputeInstanceId;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1473,7 +1788,8 @@ namespace Glance
         Dictionary<string, string> names = new Dictionary<string, string>();
         DateTime prevT;
         bool hasPrev;
-        public readonly List<PidRate> Hot = new List<PidRate>();
+            public readonly List<PidRate> Hot = new List<PidRate>();
+            public readonly List<PidRate> Ranked = new List<PidRate>();
         Dictionary<string, ulong[]> flowPrev = new Dictionary<string, ulong[]>();
         Dictionary<string, bool> flowEnabled = new Dictionary<string, bool>();
         DateTime flowT;
@@ -1558,6 +1874,7 @@ namespace Glance
         public void SampleFlows()
         {
             Hot.Clear();
+            Ranked.Clear();
             DateTime now = DateTime.UtcNow;
             Dictionary<string, ulong[]> cur = new Dictionary<string, ulong[]>();
             Dictionary<string, uint> pids = new Dictionary<string, uint>();
@@ -1617,6 +1934,25 @@ namespace Glance
             });
             int n = list.Count > 3 ? 3 : list.Count;
             for (int i = 0; i < n; i++) Hot.Add(list[i]);
+
+            List<PidRate> all = new List<PidRate>();
+            foreach (KeyValuePair<uint, double[]> kv in acc)
+            {
+                if (kv.Value[0] < 0.2 && kv.Value[1] < 0.2) continue;
+                PidRate r = new PidRate();
+                r.Pid = kv.Key;
+                r.Down = kv.Value[0];
+                r.Up = kv.Value[1];
+                all.Add(r);
+            }
+            all.Sort(delegate(PidRate a, PidRate b)
+            {
+                double pa = a.Down + a.Up;
+                double pb = b.Down + b.Up;
+                return pb.CompareTo(pa);
+            });
+            int m = all.Count > 12 ? 12 : all.Count;
+            for (int i = 0; i < m; i++) Ranked.Add(all[i]);
         }
 
         void ReadFamily(int family, Dictionary<string, ulong[]> cur, Dictionary<string, uint> pids)
@@ -1853,6 +2189,7 @@ namespace Glance
     sealed class ProcReader
     {
         Dictionary<uint, ulong> prevCpu = new Dictionary<uint, ulong>();
+        Dictionary<uint, ulong> prevIo = new Dictionary<uint, ulong>();
         Dictionary<uint, string> lastNames = new Dictionary<uint, string>();
         long prevWall;
         bool hasPrev;
@@ -1875,11 +2212,13 @@ namespace Glance
             return "Процесс " + pid.ToString(CultureInfo.InvariantCulture);
         }
 
-        public void Sample(List<string> hung, List<string> topName, List<double> topPct, List<string> memName, List<double> memMb)
+        public void Sample(List<string> hung, List<string> topName, List<double> topPct, List<string> memName, List<double> memMb, RankBoard ranks)
         {
             Dictionary<uint, ulong> nowCpu = new Dictionary<uint, ulong>();
             Dictionary<uint, ulong> nowMem = new Dictionary<uint, ulong>();
+            Dictionary<uint, ulong> nowIo = new Dictionary<uint, ulong>();
             Dictionary<uint, string> names = new Dictionary<uint, string>();
+            Dictionary<string, double> cpuBy = new Dictionary<string, double>();
             long wall = Stopwatch.GetTimestamp();
             IntPtr snap = CreateToolhelp32Snapshot(2, 0);
             if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return;
@@ -1911,6 +2250,9 @@ namespace Glance
                             if (bytes == 0) bytes = mem.WorkingSetSize;
                             nowMem[pid] = bytes;
                         }
+                        IoCounters io;
+                        if (GetProcessIoCounters(h, out io))
+                            nowIo[pid] = io.ReadTransferCount + io.WriteTransferCount;
                     }
                     finally { CloseHandle(h); }
                 }
@@ -1933,11 +2275,19 @@ namespace Glance
                     if (kv.Value < old) continue;
                     double procSec = (kv.Value - old) / 10000000.0;
                     double pct = procSec / sec / cores * 100.0;
-                    if (pct < 0.8) continue;
                     if (pct > 100) pct = 100;
                     string nm;
                     if (!names.TryGetValue(kv.Key, out nm) || nm.Length == 0) nm = "pid " + kv.Key.ToString(CultureInfo.InvariantCulture);
                     if (nm.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) nm = nm.Substring(0, nm.Length - 4);
+                    if (pct >= 0.3)
+                    {
+                        double have;
+                        if (!cpuBy.TryGetValue(nm, out have)) have = 0;
+                        have += pct;
+                        if (have > 100) have = 100;
+                        cpuBy[nm] = have;
+                    }
+                    if (pct < 0.8) continue;
                     Item it = new Item();
                     it.Pct = pct;
                     it.Name = nm;
@@ -1951,15 +2301,91 @@ namespace Glance
                     topPct.Add(items[i].Pct);
                 }
             }
+            if (ranks != null) PutRanks(cpuBy, ranks.Rows[0], 5, 0.3, 0, 0);
+            FillMemory(nowMem, names, memName, memMb, ranks);
+            FillDisk(nowIo, names, ranks, sec);
             prevCpu = nowCpu;
+            prevIo = nowIo;
             prevWall = wall;
             hasPrev = true;
             if (names.Count > 0) lastNames = names;
-            FillMemory(nowMem, names, memName, memMb);
             CollectHung(hung, names);
         }
 
-        void FillMemory(Dictionary<uint, ulong> nowMem, Dictionary<uint, string> names, List<string> memName, List<double> memMb)
+        void FillDisk(Dictionary<uint, ulong> nowIo, Dictionary<uint, string> names, RankBoard ranks, double sec)
+        {
+            if (ranks == null || !hasPrev) return;
+            if (sec < 0.2) sec = 0.2;
+            Dictionary<string, double> by = new Dictionary<string, double>();
+            foreach (KeyValuePair<uint, ulong> kv in nowIo)
+            {
+                if ((int)kv.Key == selfPid) continue;
+                ulong old;
+                if (!prevIo.TryGetValue(kv.Key, out old) || kv.Value < old) continue;
+                double mbs = (kv.Value - old) / 1048576.0 / sec;
+                if (mbs < 0.15) continue;
+                string nm = Nice(names, kv.Key);
+                double have;
+                if (!by.TryGetValue(nm, out have)) have = 0;
+                by[nm] = have + mbs;
+            }
+            PutRanks(by, ranks.Rows[4], 5, 0.15, 2, 0);
+        }
+
+        static string Nice(Dictionary<uint, string> names, uint pid)
+        {
+            string nm;
+            if (!names.TryGetValue(pid, out nm) || nm.Length == 0) nm = "pid " + pid.ToString(CultureInfo.InvariantCulture);
+            if (nm.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) nm = nm.Substring(0, nm.Length - 4);
+            return nm;
+        }
+
+        static void PutRanks(Dictionary<string, double> map, List<Rank> dst, int limit, double floor, int mode, double totalMb)
+        {
+            if (dst == null) return;
+            dst.Clear();
+            List<Item> items = new List<Item>();
+            foreach (KeyValuePair<string, double> kv in map)
+            {
+                if (kv.Value < floor) continue;
+                Item it = new Item();
+                it.Name = kv.Key;
+                it.Mb = kv.Value;
+                items.Add(it);
+            }
+            items.Sort(delegate(Item a, Item b) { return b.Mb.CompareTo(a.Mb); });
+            int n = items.Count > limit ? limit : items.Count;
+            CultureInfo ru = CultureInfo.GetCultureInfo("ru-RU");
+            for (int i = 0; i < n; i++)
+            {
+                Rank r = new Rank();
+                double v = items[i].Mb;
+                if (mode == 0)
+                {
+                    r.Text = ((int)Math.Round(v)).ToString(CultureInfo.InvariantCulture) + "%   " + items[i].Name;
+                    r.Share = v;
+                }
+                else if (mode == 1)
+                {
+                    r.Text = MemLabel(v) + "   " + items[i].Name;
+                    r.Share = totalMb > 1 ? v / totalMb * 100.0 : -1;
+                }
+                else
+                {
+                    r.Text = v.ToString("0.0", ru) + " МБ/с   " + items[i].Name;
+                    r.Share = -1;
+                }
+                dst.Add(r);
+            }
+        }
+
+        static string MemLabel(double mb)
+        {
+            if (mb >= 1024) return (mb / 1024.0).ToString("0.0", CultureInfo.GetCultureInfo("ru-RU")) + " ГБ";
+            return ((int)Math.Round(mb)).ToString(CultureInfo.InvariantCulture) + " МБ";
+        }
+
+        void FillMemory(Dictionary<uint, ulong> nowMem, Dictionary<uint, string> names, List<string> memName, List<double> memMb, RankBoard ranks)
         {
             Dictionary<string, double> byName = new Dictionary<string, double>();
             foreach (KeyValuePair<uint, ulong> kv in nowMem)
@@ -1988,6 +2414,17 @@ namespace Glance
             {
                 memName.Add(items[i].Name);
                 memMb.Add(items[i].Mb);
+            }
+            if (ranks != null)
+            {
+                Dictionary<string, double> hover = new Dictionary<string, double>();
+                foreach (KeyValuePair<string, double> kv in byName)
+                {
+                    if (kv.Value >= 40) hover[kv.Key] = kv.Value;
+                }
+                double totalMb = 0;
+                foreach (KeyValuePair<uint, ulong> kv in nowMem) totalMb += kv.Value / 1048576.0;
+                PutRanks(hover, ranks.Rows[1], 5, 40, 1, totalMb);
             }
         }
 
@@ -2051,6 +2488,17 @@ namespace Glance
             public ulong SharedCommitUsage;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        struct IoCounters
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
         delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -2070,6 +2518,9 @@ namespace Glance
 
         [DllImport("psapi.dll", SetLastError = true)]
         static extern bool GetProcessMemoryInfo(IntPtr hProcess, out MemCounters counters, uint size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetProcessIoCounters(IntPtr hProcess, out IoCounters counters);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool CloseHandle(IntPtr h);
