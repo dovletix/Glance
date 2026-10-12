@@ -183,9 +183,11 @@ namespace Glance
         Rectangle closeRect;
         readonly Rectangle[] barHit = new Rectangle[6];
         readonly Rectangle[] listHit = new Rectangle[6];
+        readonly Rectangle[] bridgeHit = new Rectangle[6];
         readonly Ease[] openEase = new Ease[] { new Ease(), new Ease(), new Ease(), new Ease(), new Ease(), new Ease() };
-        readonly int[] revealTail = new int[6];
         int hover = -1;
+        int flySlot;
+        bool flyRight;
         System.Windows.Forms.Timer uiTimer;
 
         Font titleFont;
@@ -500,6 +502,7 @@ namespace Glance
             for (int i = 0; i < listHit.Length; i++)
             {
                 if (!listHit[i].IsEmpty && listHit[i].Contains(p)) return i;
+                if (!bridgeHit[i].IsEmpty && bridgeHit[i].Contains(p)) return i;
             }
             for (int i = 0; i < barHit.Length; i++)
             {
@@ -535,16 +538,19 @@ namespace Glance
                 bool netHotStripe = snap.HasNet && (snap.Down >= 5 || snap.Up >= 5 || downEase.Value >= 5 || upEase.Value >= 5);
                 if (netHotStripe && worst < 75) stripe = warn;
             }
+            PlaceFlyout();
+            int origin = flyRight ? 0 : flySlot;
             using (SolidBrush b = new SolidBrush(stripe))
-                g.FillRectangle(b, 0, 0, S(5), ClientSize.Height);
+                g.FillRectangle(b, origin, 0, S(5), ClientSize.Height);
 
-            int x = S(18);
-            int w = ClientSize.Width - S(32);
+            int x = origin + S(18);
+            int w = S(BaseW) - S(32);
             DrawUi(g, "Метрики", titleFont, new Rectangle(x, S(12), w - S(40), S(28)), text,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
             int cs = S(22);
-            closeRect = new Rectangle(ClientSize.Width - S(18) - cs, S(14), cs, cs);
+            int panelRight = flyRight ? S(BaseW) : ClientSize.Width;
+            closeRect = new Rectangle(panelRight - S(18) - cs, S(14), cs, cs);
             using (Pen p = new Pen(muted, Math.Max(1.4f, scale)))
             {
                 g.DrawEllipse(p, closeRect);
@@ -599,7 +605,7 @@ namespace Glance
             if (snap.HasNet) netVal = "↓ " + Num(downEase.Value) + "   ↑ " + Num(upEase.Value) + " Мбит/с";
             bool netHot = snap.HasNet && (snap.Down >= 5 || snap.Up >= 5 || downEase.Value >= 5 || upEase.Value >= 5);
             y = DrawMetric(g, x, y, w, "Сеть", netVal, null, null, netHot ? warn : text, 5, snap);
-            if (snap.HasNet && !string.IsNullOrEmpty(snap.NetName) && openEase[5].Value < 0.2)
+            if (snap.HasNet && !string.IsNullOrEmpty(snap.NetName))
             {
                 DrawUi(g, snap.NetName, tinyFont, new Rectangle(x, y - S(18), w, S(16)), muted,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
@@ -715,9 +721,7 @@ namespace Glance
                 }
             }
 
-            int tail = 0;
-            for (int i = 0; i < revealTail.Length; i++) tail += revealTail[i];
-            int need = y + S(18) + tail;
+            int need = y + S(18);
             if (Math.Abs(ClientSize.Height - need) > 2)
                 ClientSize = new Size(ClientSize.Width, need);
             bool moving = false;
@@ -764,32 +768,81 @@ namespace Glance
             hit.Inflate(0, S(12));
             barHit[section] = hit;
             listHit[section] = Rectangle.Empty;
-            int extra = 0;
+            bridgeHit[section] = Rectangle.Empty;
             double open = openEase[section].Value;
             int full = RevealFull(snap, section);
-            int vis = 0;
-            if (open > 0.01 && full > 0)
+            if (open > 0.01 && full > 0 && flySlot > 0)
             {
                 List<Rank> rows = snap.Ranks == null ? null : snap.Ranks.Rows[section];
                 int count = rows == null ? 0 : rows.Count;
                 if (count > 5) count = 5;
-                vis = (int)Math.Round(full * open);
-                if (vis < 1) vis = 1;
-                if (vis > full) vis = full;
-                Rectangle box = new Rectangle(x, barRect.Bottom + S(8), w, vis);
-                Rectangle list = box;
-                list.Y -= S(10);
-                list.Height += S(10);
-                listHit[section] = list;
+                int listW = S(232);
+                int top = barRect.Top + barRect.Height / 2 - full / 2;
+                int minTop = S(8);
+                int maxTop = ClientSize.Height - S(8) - full;
+                if (maxTop < minTop) maxTop = minTop;
+                if (top < minTop) top = minTop;
+                if (top > maxTop) top = maxTop;
+                int slide = (int)Math.Round((1.0 - open) * (listW + S(10)));
+                Rectangle box;
+                Rectangle clip;
+                if (flyRight)
+                {
+                    box = new Rectangle(S(BaseW) + S(10) - slide, top, listW, full);
+                    clip = new Rectangle(S(BaseW), 0, flySlot, ClientSize.Height);
+                }
+                else
+                {
+                    box = new Rectangle(slide, top, listW, full);
+                    clip = new Rectangle(0, 0, flySlot, ClientSize.Height);
+                }
+                g.SetClip(clip);
                 Color accent = bar.HasValue ? Level(bar.Value < 0 ? 0 : bar.Value) : valueColor;
                 DrawReveal(g, box, rows, count, accent);
-                extra = vis + S(6);
+                Rectangle visible = Rectangle.Intersect(box, clip);
+                listHit[section] = visible;
+                int bridgeLeft = flyRight ? barRect.Right : visible.Right;
+                int bridgeRight = flyRight ? visible.Left : barRect.Left;
+                if (bridgeRight < bridgeLeft)
+                {
+                    int swap = bridgeLeft;
+                    bridgeLeft = bridgeRight;
+                    bridgeRight = swap;
+                }
+                if (bridgeRight > bridgeLeft)
+                    bridgeHit[section] = new Rectangle(bridgeLeft, barRect.Top - S(14), bridgeRight - bridgeLeft, barRect.Height + S(28));
             }
-            if ((hover == section || open > 0.01) && full > 0)
-                revealTail[section] = Math.Max(0, full + S(6) - extra);
-            else
-                revealTail[section] = 0;
-            return y + S(80) + extra;
+            return y + S(80);
+        }
+
+        void PlaceFlyout()
+        {
+            int panelW = S(BaseW);
+            int flyOuter = S(232) + S(10);
+            bool want = false;
+            for (int i = 0; i < openEase.Length; i++)
+            {
+                if (hover == i || openEase[i].Value > 0.01) want = true;
+            }
+            if (want && flySlot == 0)
+            {
+                Screen screen = Screen.FromControl(this);
+                flyRight = Left - screen.WorkingArea.Left < flyOuter + S(8);
+            }
+            int slot = want ? flyOuter : 0;
+            if (ClientSize.Width != panelW + slot)
+            {
+                if (flyRight)
+                    ClientSize = new Size(panelW + slot, ClientSize.Height);
+                else
+                {
+                    int right = Left + Width;
+                    ClientSize = new Size(panelW + slot, ClientSize.Height);
+                    Left = right - Width;
+                }
+            }
+            flySlot = slot;
+            if (!want) flyRight = false;
         }
 
         int RevealFull(Snapshot snap, int section)
@@ -803,7 +856,7 @@ namespace Glance
 
         void DrawReveal(Graphics g, Rectangle box, List<Rank> rows, int count, Color accent)
         {
-            g.SetClip(box);
+            g.SetClip(box, CombineMode.Intersect);
             using (SolidBrush back = new SolidBrush(Color.FromArgb(24, 28, 40)))
                 FillRound(g, back, box, S(8));
             using (SolidBrush mark = new SolidBrush(accent))
@@ -1065,7 +1118,9 @@ namespace Glance
             try
             {
                 StringBuilder sb = new StringBuilder();
-                sb.Append("X=").Append(Location.X.ToString(CultureInfo.InvariantCulture)).Append('\n');
+                int px = Location.X;
+                if (flySlot > 0 && !flyRight) px += flySlot;
+                sb.Append("X=").Append(px.ToString(CultureInfo.InvariantCulture)).Append('\n');
                 sb.Append("Y=").Append(Location.Y.ToString(CultureInfo.InvariantCulture)).Append('\n');
                 sb.Append("TopMost=").Append(TopMost ? "1" : "0").Append('\n');
                 sb.Append("ClickThrough=").Append(clickThrough ? "1" : "0").Append('\n');
